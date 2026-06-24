@@ -9,6 +9,7 @@ Loop Engineering: Agent configuration and automation patterns
 
 ### docs/
 - [loop-engineering.md](docs/loop-engineering.md) — ループエンジニアリングのルールセット（基本ルール・ループ実行・失敗記録・完了条件）
+- [approval-levels.md](docs/approval-levels.md) — エージェントの承認レベル定義（L0自動実行〜L3禁止、アクション別分類）
 
 ### templates/
 - [loop-engineering-instructions.md](templates/loop-engineering-instructions.md) — CLAUDE.md / Project Instructions にそのまま貼り付けて使えるテンプレート
