@@ -30,7 +30,15 @@ opencode は `Copilot-Integration-Id` を送らず、OAuth トークン（`ghu_`
 
 重要なのは、**この不安定さが GitHub 側で発生している**こと。完全に同一のリクエストを連続で投げても 200 / 400 / 403 が混ざるため、クライアント実装の問題ではなく、GitHub 側のクライアント別制限の適用が一貫していない。
 
-`Copilot-Integration-Id: vscode-chat`（VS Code Copilot Chat の識別子）を明示すると、上記すべてが安定して 200 で通る。つまり制限はヘッダ一つで越えられる。
+このヘッダは検証されていない。登録されていない任意の文字列（`opencode` など）でも受け付けられ、値によって結果が変わる。名乗り方を変えて 4〜6 回ずつ測った結果:
+
+| 名乗り方 | `claude-opus-4.7` | `claude-opus-4.8` | `gpt-6-astra` | `claude-opus-5` |
+|---|---|---|---|---|
+| ヘッダなし（推定に任せる） | 6/6 | 4/6 | 3/6 | 0/6 |
+| `copilot-language-server`（実体どおり） | 6/6 | 0/4 | 0/4 | 0/4 |
+| `vscode-chat`（VS Code Copilot Chat を名乗る） | 6/6 | 5/6 | 3/6 | **2/6** |
+
+**正直に名乗ると確定的に閉まり、通すには別クライアントを名乗る必要がある**という構造になっている。そして他クライアントを名乗っても `claude-opus-5` は 2/6、`gpt-6-astra` は 3/6 でしかなく、**制限を越えても常用できるモデルは1つも増えない**。
 
 なお `gpt-6-astra` / `gpt-5.5` / `gpt-5.6-*` / `gpt-5.3-codex` は `supported_endpoints` が `/responses` のみで、`/chat/completions` には存在しない（`unsupported_api_for_model`）。クライアント側が Responses API に対応していないとそもそも呼べない。
 
@@ -39,9 +47,20 @@ opencode は `Copilot-Integration-Id` を送らず、OAuth トークン（`ghu_`
 1. **主経路は Bedrock**。長文脈（200K超）、最新世代モデル（Opus 5 等）、明示的なプロンプトキャッシュ、Batch / Files API、Anthropic 製サーバーツールが必要な作業は Bedrock 経路を使う。
 2. **副経路として Copilot を使う**。既存 seat を活かした日常的なコーディング作業に限る。
 3. **Copilot 経路の既定モデルは、実測で成功率 100% のモデルから選ぶ**。2026-09-09 時点では `claude-opus-4.7`（代替: `claude-haiku-4.5`、GPT 系が必要なら `gpt-5.5`）。成功率が 100% でないモデル（`claude-opus-4.8` 4/6、`claude-sonnet-5` 3/6、`gpt-6-astra` 3/6）を既定にしない。モデルを追加・変更するときは連続 6 回以上試して成功率を確認する。
-4. **`Copilot-Integration-Id` を偽装してモデル制限を越えることは禁止（L3 相当）**。GitHub が ToS を根拠に明示的に拒否しているクライアント制限であり、技術的に可能でもアクセス制御の回避に当たる。必要なら組織管理者に正規の解放を依頼する。
+4. **`Copilot-Integration-Id` を偽装してモデル制限を越えることは禁止（L3 相当）**。理由は3つある。
+   - GitHub が ToS を根拠に明示的に拒否しているクライアント制限であり、技術的に可能でもアクセス制御の回避に当たる
+   - **実利がない**。上表のとおり偽装しても `claude-opus-5` は 2/6、`gpt-6-astra` は 3/6 で、既定にできるモデルは増えない
+   - **監査上の追跡可能性を失う**。組織の Copilot 利用ログにはその名乗り（例: VS Code Chat）として記録されるため、実際に使ったクライアントが追えなくなり、インシデント時に説明できない
+
+   必要なら組織管理者に正規の解放を依頼する。ヘッダを送らない（GitHub の推定に任せる）のが既定とする。
 5. **認証トークンの取り違えを防ぐ**。Copilot 用トークン（会社アカウント）を `GITHUB_TOKEN` で渡す場合、`GH_TOKEN` に `gh` 自身のトークン（個人アカウント）を明示的に入れ直し、セッション内の `gh` / `glab` が別アカウントにすり替わらないようにする。
-6. **承認レベルは経路に依存しない**。[approval-levels.md](../approval-levels.md) の L0〜L3 をエージェント側の permission 機構にマップする（L0→allow / L2→ask / L3→deny）。permission をバイパスする起動オプション（`--dangerously-skip-permissions` 等、およびそれを付与するランチャの yolo モード）は使わない。
+6. **エージェント経路では、シークレットの読み取りを permission 層で塞ぐ**。エディタの補完・チャットと違い、エージェントはリポジトリを横断的に読み、bash の出力も文脈に載せる。送信先（GitHub / Microsoft のインフラ）は VS Code Copilot Chat と同じでも、**流れるデータ量が桁違い**になる。そのため次を必須とする。
+   - シークレット類（`.env*`、`~/.aws/**`、`~/.ssh/**`、`*.pem`、`id_rsa*`、`~/.config/gh/**`、認証情報ファイル）を**ファイル読み取りツールと bash の両方で** `deny` にする。片方だけでは `cat .env` が素通りする（実測で確認済み）
+   - 環境変数の一覧表示（`env` / `printenv` / `export -p`）とトークン出力コマンド（`gh auth token` 等）を `ask` 以上にする
+   - 認証情報は環境変数ではなくクライアントの資格情報ストアに置く（opencode なら `opencode auth login` で `auth.json`）。環境変数に置くと、許可された任意コマンドの子プロセスから読める
+   - `webfetch` は `ask`。外部ページの指示による持ち出し（prompt injection）の経路を明示承認なしでは踏ませない
+
+7. **承認レベルは経路に依存しない**。[approval-levels.md](../approval-levels.md) の L0〜L3 をエージェント側の permission 機構にマップする（L0→allow / L2→ask / L3→deny）。permission をバイパスする起動オプション（`--dangerously-skip-permissions` 等、およびそれを付与するランチャの yolo モード）は使わない。
 
 ## 帰結
 
@@ -71,7 +90,8 @@ GitHub 側の制限とは切り分けて記録する。これらは経路の問�
 
 | 選択肢 | 却下理由 |
 |---|---|
-| `Copilot-Integration-Id` を `vscode-chat` に差し替えて全モデルを解放する | GitHub が ToS を根拠に拒否しているクライアント制限の回避に当たる。決定 4 の通り禁止 |
+| `Copilot-Integration-Id` を `vscode-chat` に差し替えて全モデルを解放する | 一度実際に設定して測ったが、`claude-opus-5` は 2/6・`gpt-6-astra` は 3/6 で常用できるモデルは増えなかった。回避のリスク（ToS、監査上の追跡不能）に対して実利がないため撤去した。決定 4 の通り禁止 |
+| `Copilot-Integration-Id` に実体どおり `copilot-language-server` を明示する | 挙動は決定的になるが、上位モデルが確定的に拒否されるだけで得るものがない。ヘッダ自体を送らない現状と実用差がない |
 | Copilot CLI の組織承認を待ってから CLI 系エージェントを整備する | 承認時期が読めない。opencode 経路が今すぐ使えるため待つ必要がない |
 | Bedrock 一本に統一する | 既に支払っている Copilot seat が遊ぶ。日常的なコーディング作業には Copilot 経路で足りる |
 | 不安定なモデル（`claude-opus-4.8`）を既定にしてリトライで凌ぐ | 3回に1回しか通らず、ループ運用で失敗が積み上がる |
